@@ -12,6 +12,7 @@ const {
   TextInputStyle,
   UserSelectMenuBuilder,
   RoleSelectMenuBuilder,
+  StringSelectMenuBuilder,
   SlashCommandBuilder,
   LabelBuilder,
   RadioGroupBuilder,
@@ -256,6 +257,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isModalSubmit()) await handleModal(interaction);
     if (interaction.isUserSelectMenu()) await handleSelect(interaction);
     if (interaction.isRoleSelectMenu()) await handleRoleSelect(interaction);
+    if (interaction.isStringSelectMenu()) await handlePanelCategory(interaction);
   } catch (e) {
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction.reply({ embeds: [red("Erreur")], flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -395,44 +397,111 @@ async function resetGuild(guild) {
   return deleted;
 }
 
+const PANEL_CATEGORIES = {
+  settings: {
+    label: "Paramètres",
+    description: "Nom, limite, bitrate, statut",
+    emoji: E.settings,
+    buttons: [
+      ["voc_rename", E.pen, "Renommer"],
+      ["voc_limit", E.member, "Limite"],
+      ["voc_bitrate", E.voice, "Bitrate"],
+      ["voc_status", E.pen, "Statut"]
+    ]
+  },
+  access: {
+    label: "Accès & visibilité",
+    description: "Verrou, masquage, rôles autorisés",
+    emoji: E.lock,
+    buttons: [
+      ["voc_lock", E.lock, "Verrouiller"],
+      ["voc_hide", E.compass, "Cacher"],
+      ["voc_allowrole", E.crown, "Autoriser rôle"],
+      ["voc_removerole", E.forbidden, "Retirer rôle"]
+    ]
+  },
+  members: {
+    label: "Membres",
+    description: "Expulser, mute, black/whitelist",
+    emoji: E.member,
+    buttons: [
+      ["voc_kick", E.member, "Expulser"],
+      ["voc_mute", E.lock, "Mute"],
+      ["voc_blacklist", E.forbidden, "Blacklist"],
+      ["voc_unblacklist", E.check, "Unblacklist"],
+      ["voc_whitelist", E.plus, "Whitelist"],
+      ["voc_unwhitelist", E.compass, "Unwhitelist"]
+    ]
+  },
+  ownership: {
+    label: "Propriété",
+    description: "Transfert, réclamer, co-propriétaires",
+    emoji: E.crown,
+    buttons: [
+      ["voc_transfer", E.crown, "Transférer"],
+      ["voc_claim", E.voice, "Réclamer"],
+      ["voc_trust", E.crown, "Promouvoir"],
+      ["voc_untrust", E.forbidden, "Rétrograder"]
+    ]
+  },
+  channel: {
+    label: "Salon",
+    description: "Sauvegarde et suppression",
+    emoji: E.save,
+    buttons: [
+      ["voc_save", E.save, "Sauvegarder"],
+      ["voc_delete", E.trash, "Supprimer"]
+    ]
+  }
+};
+
+function parseEmoji(str) {
+  const m = /^<(a)?:(\w+):(\d+)>$/.exec(str);
+  return m ? { name: m[2], id: m[3], animated: Boolean(m[1]) } : { name: str };
+}
+
+function buildCategoryRows(key) {
+  const cat = PANEL_CATEGORIES[key];
+  if (!cat) return [];
+  const rows = [];
+  for (let i = 0; i < cat.buttons.length; i += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      cat.buttons.slice(i, i + 5).map(([id, emoji, label]) =>
+        new ButtonBuilder()
+          .setCustomId(id)
+          .setEmoji(emoji)
+          .setLabel(label)
+          .setStyle(id === "voc_delete" ? ButtonStyle.Danger : ButtonStyle.Secondary)
+      )
+    );
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function sendPanel(channel, owner) {
   const embed = new EmbedBuilder()
     .setColor(COLORS.blurple)
     .setTitle(`${E.settings} Panneau de contrôle`)
-    .setDescription("Utilise les boutons pour gérer ton salon");
+    .setDescription("Choisis une catégorie dans le menu pour afficher ses actions.");
 
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_rename").setEmoji(E.pen).setLabel("Renommer").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_limit").setEmoji(E.member).setLabel("Limite").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_lock").setEmoji(E.lock).setLabel("Verrouiller").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_hide").setEmoji(E.compass).setLabel("Cacher").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_bitrate").setEmoji(E.voice).setLabel("Bitrate").setStyle(ButtonStyle.Secondary)
-  );
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_blacklist").setEmoji(E.forbidden).setLabel("Blacklist").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_unblacklist").setEmoji(E.check).setLabel("Unblacklist").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_whitelist").setEmoji(E.plus).setLabel("Whitelist").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_unwhitelist").setEmoji(E.lock).setLabel("Unwhitelist").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_allowrole").setEmoji(E.crown).setLabel("Autoriser rôle").setStyle(ButtonStyle.Secondary)
-  );
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_kick").setEmoji(E.member).setLabel("Expulser").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_mute").setEmoji(E.lock).setLabel("Mute").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_status").setEmoji(E.pen).setLabel("Statut").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_removerole").setEmoji(E.forbidden).setLabel("Retirer rôle").setStyle(ButtonStyle.Secondary)
-  );
-  const row4 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_transfer").setEmoji(E.crown).setLabel("Transférer").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_claim").setEmoji(E.voice).setLabel("Réclamer").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_trust").setEmoji(E.crown).setLabel("Promouvoir").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_untrust").setEmoji(E.forbidden).setLabel("Rétrograder").setStyle(ButtonStyle.Secondary)
-  );
-  const row5 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_save").setEmoji(E.save).setLabel("Sauvegarder").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_delete").setEmoji(E.trash).setLabel("Supprimer").setStyle(ButtonStyle.Danger)
-  );
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("voc_panel_category")
+    .setPlaceholder("Choisir une catégorie…")
+    .addOptions(
+      Object.entries(PANEL_CATEGORIES).map(([value, cat]) => ({
+        label: cat.label,
+        description: cat.description,
+        value,
+        emoji: parseEmoji(cat.emoji)
+      }))
+    );
 
-  await channel.send({ content: `<@${owner.id}>`, embeds: [embed], components: [row1, row2, row3, row4, row5] });
+  await channel.send({
+    content: `<@${owner.id}>`,
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(menu)]
+  });
 }
 
 function getData(interaction) {
@@ -963,6 +1032,26 @@ async function handleRoleSelect(interaction) {
     await interaction.channel.permissionOverwrites.delete(roleId).catch(() => {});
     await interaction.update({ embeds: [blurple(`${E.forbidden} Rôle <@&${roleId}> retiré des autorisations`)], components: [] });
   }
+}
+
+async function handlePanelCategory(interaction) {
+  if (interaction.customId !== "voc_panel_category") return;
+  const data = getData(interaction);
+  if (!data) {
+    await interaction.reply({ embeds: [red("Ce salon n'est pas un salon temporaire")], flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const key = interaction.values[0];
+  const cat = PANEL_CATEGORIES[key];
+  if (!cat) {
+    await interaction.reply({ embeds: [red("Catégorie inconnue")], flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.blurple)
+    .setTitle(`${cat.emoji} ${cat.label}`)
+    .setDescription(cat.description);
+  await interaction.reply({ embeds: [embed], components: buildCategoryRows(key), flags: MessageFlags.Ephemeral });
 }
 
 client.login(config.token);
