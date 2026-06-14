@@ -1,4 +1,4 @@
-# Echo Voice
+# 🔊 Echo Voice
 
 Bot Discord de **salons vocaux temporaires**
 
