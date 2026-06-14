@@ -51,7 +51,7 @@ npm install
 cp .env.example .env
 ```
 
-## Configuration (`.env`)
+## Configuration `.env`
 
 | Variable | Description |
 | --- | --- |
@@ -73,8 +73,8 @@ node launch.js
 
 ## Fichiers générés
 
-- `data.json` — état des salons temporaires actifs (non versionné).
-- `presets.json` — sauvegardes de configuration par utilisateur (non versionné).
+- `data.json` — état des salons temporaires actifs
+- `presets.json` — sauvegardes de configuration par utilisateur
 
 ## Stack
 
@@ -92,5 +92,5 @@ Supporte le développeur et le bot en faisant un petit don
 
 ## A propos
 
-Crée et développé par zoltex999
+Crée et développé par zoltex999, 
 Tous droits réservés
