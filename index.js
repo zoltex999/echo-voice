@@ -11,10 +11,13 @@ const {
   TextInputBuilder,
   TextInputStyle,
   UserSelectMenuBuilder,
+  RoleSelectMenuBuilder,
   SlashCommandBuilder,
   LabelBuilder,
   RadioGroupBuilder,
   RadioGroupOptionBuilder,
+  CheckboxGroupBuilder,
+  CheckboxGroupOptionBuilder,
   ActivityType,
   MessageFlags
 } = require("discord.js");
@@ -49,7 +52,8 @@ const E = {
   voice: "<:sound:1514249505393086696>",
   settings: "<:settings:1514249503790727231>",
   compass: "<:compass:1514249502855401512>",
-  forbidden: "<:forbidden:1514249533121630248>"
+  forbidden: "<:forbidden:1514249533121630248>",
+  save: "<:save:1515680620809031710>"
 };
 
 const client = new Client({
@@ -65,12 +69,8 @@ const creationCooldowns = new Map();
 
 const COLORS = { blurple: 0x5865f2, red: 0xed4245 };
 
-// Permission "Définir le statut du salon vocal" (bit 48), absente de PermissionFlagsBits
-// dans cette version de discord.js : on la manipule donc en bitfield brut.
 const SET_STATUS_BIT = 1n << 48n;
 
-// Verrouille le statut du salon : personne (même pas le propriétaire) ne peut le
-// modifier nativement via Discord, seul le bot le peut (via le bouton du panneau).
 async function enforceStatusLock(channel) {
   const everyoneId = channel.guild.roles.everyone.id;
   const botId = channel.client.user.id;
@@ -108,7 +108,15 @@ function red(description) {
 function saveData() {
   const obj = {};
   for (const [id, d] of tempChannels) {
-    obj[id] = { ownerId: d.ownerId, blacklist: [...d.blacklist], joinOrder: d.joinOrder, status: d.status ?? null };
+    obj[id] = {
+      ownerId: d.ownerId,
+      blacklist: [...d.blacklist],
+      whitelist: [...d.whitelist],
+      trusted: [...d.trusted],
+      allowedRoles: [...d.allowedRoles],
+      joinOrder: d.joinOrder,
+      status: d.status ?? null
+    };
   }
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
@@ -126,7 +134,6 @@ function loadData() {
   }
 }
 
-// Presets par propriétaire : { [userId]: { name, status, limit, bitrate, hidden, blacklist } }
 function loadPresets() {
   if (!fs.existsSync(PRESETS_FILE)) return {};
   try {
@@ -144,13 +151,11 @@ function savePresets(presets) {
   }
 }
 
-// Indique si le salon est caché pour @everyone (permission ViewChannel refusée).
 function isHidden(channel) {
   const everyoneId = channel.guild.roles.everyone.id;
   return Boolean(channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.ViewChannel));
 }
 
-// Met à jour le statut du salon vocal (route REST dédiée) et mémorise la valeur.
 async function setChannelStatus(channel, status, data) {
   await channel.client.rest.put(`/channels/${channel.id}/voice-status`, {
     body: { status: status || null }
@@ -161,7 +166,6 @@ async function setChannelStatus(channel, status, data) {
   }
 }
 
-// Applique l'identité et la présence du bot depuis le .env.
 async function applyIdentity() {
   client.user.setPresence({
     status: config.presenceStatus,
@@ -171,7 +175,6 @@ async function applyIdentity() {
   });
 
   if (config.botName && client.user.username !== config.botName) {
-    // Discord limite fortement les changements de nom : on tente sans bloquer le démarrage.
     await client.user.setUsername(config.botName).catch((e) => console.error("Échec setUsername:", e.message));
   }
 
@@ -218,7 +221,15 @@ client.once("ready", async () => {
 
     await grantOwner(channel);
     await enforceStatusLock(channel);
-    tempChannels.set(channelId, { ownerId, blacklist: new Set(d.blacklist || []), joinOrder, status: d.status ?? null });
+    tempChannels.set(channelId, {
+      ownerId,
+      blacklist: new Set(d.blacklist || []),
+      whitelist: new Set(d.whitelist || []),
+      trusted: new Set(d.trusted || []),
+      allowedRoles: new Set(d.allowedRoles || []),
+      joinOrder,
+      status: d.status ?? null
+    });
   }
   saveData();
   console.log(`♻️ ${tempChannels.size} salon(s) temporaire(s) rechargé(s)`);
@@ -244,6 +255,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton()) await handleButton(interaction);
     if (interaction.isModalSubmit()) await handleModal(interaction);
     if (interaction.isUserSelectMenu()) await handleSelect(interaction);
+    if (interaction.isRoleSelectMenu()) await handleRoleSelect(interaction);
   } catch (e) {
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction.reply({ embeds: [red("Erreur")], flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -252,6 +264,33 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.on("voiceStateUpdate", async (oldState, newState) => {
+  if (oldState.channel && tempChannels.has(oldState.channel.id) && oldState.channelId !== newState.channelId) {
+    const channel = oldState.channel;
+    const data = tempChannels.get(channel.id);
+    data.joinOrder = data.joinOrder.filter((id) => id !== oldState.id);
+
+    if (channel.members.size === 0) {
+      tempChannels.delete(channel.id);
+      saveData();
+      await channel.delete().catch(() => {});
+    } else {
+      if (oldState.id === data.ownerId && data.joinOrder.length > 0) {
+        const newOwnerId = data.joinOrder[0];
+        await channel.permissionOverwrites.delete(data.ownerId).catch(() => {});
+        data.ownerId = newOwnerId;
+        await channel.permissionOverwrites.edit(newOwnerId, {
+          Connect: true,
+          ViewChannel: true,
+          ManageChannels: true,
+          MoveMembers: true
+        });
+        await grantOwner(channel);
+        await channel.send({ embeds: [blurple(`${E.crown} <@${newOwnerId}> est désormais propriétaire du salon`)] }).catch(() => {});
+      }
+      saveData();
+    }
+  }
+
   if (newState.channel && newState.channel.name === config.creatorChannelName) {
     const member = newState.member;
 
@@ -283,7 +322,15 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     });
     await grantOwner(channel);
     await enforceStatusLock(channel);
-    tempChannels.set(channel.id, { ownerId: member.id, blacklist: new Set(), joinOrder: [member.id], status: null });
+    tempChannels.set(channel.id, {
+      ownerId: member.id,
+      blacklist: new Set(),
+      whitelist: new Set(),
+      trusted: new Set(),
+      allowedRoles: new Set(),
+      joinOrder: [member.id],
+      status: null
+    });
     saveData();
     await member.voice.setChannel(channel);
     await sendPanel(channel, member);
@@ -296,34 +343,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       data.joinOrder.push(newState.id);
       saveData();
     }
-  }
-
-  if (oldState.channel && tempChannels.has(oldState.channel.id) && oldState.channelId !== newState.channelId) {
-    const channel = oldState.channel;
-    const data = tempChannels.get(channel.id);
-    data.joinOrder = data.joinOrder.filter((id) => id !== oldState.id);
-
-    if (channel.members.size === 0) {
-      tempChannels.delete(channel.id);
-      saveData();
-      await channel.delete().catch(() => {});
-      return;
-    }
-
-    if (oldState.id === data.ownerId && data.joinOrder.length > 0) {
-      const newOwnerId = data.joinOrder[0];
-      await channel.permissionOverwrites.delete(data.ownerId).catch(() => {});
-      data.ownerId = newOwnerId;
-      await channel.permissionOverwrites.edit(newOwnerId, {
-        Connect: true,
-        ViewChannel: true,
-        ManageChannels: true,
-        MoveMembers: true
-      });
-      await grantOwner(channel);
-      await channel.send({ embeds: [blurple(`${E.crown} <@${newOwnerId}> est désormais propriétaire du salon`)] }).catch(() => {});
-    }
-    saveData();
   }
 });
 
@@ -386,24 +405,34 @@ async function sendPanel(channel, owner) {
     new ButtonBuilder().setCustomId("voc_rename").setEmoji(E.pen).setLabel("Renommer").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_limit").setEmoji(E.member).setLabel("Limite").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_lock").setEmoji(E.lock).setLabel("Verrouiller").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_hide").setEmoji(E.compass).setLabel("Cacher").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("voc_hide").setEmoji(E.compass).setLabel("Cacher").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_bitrate").setEmoji(E.voice).setLabel("Bitrate").setStyle(ButtonStyle.Secondary)
   );
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("voc_blacklist").setEmoji(E.forbidden).setLabel("Blacklist").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_unblacklist").setEmoji(E.check).setLabel("Unblacklist").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_transfer").setEmoji(E.crown).setLabel("Transférer").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_claim").setEmoji(E.voice).setLabel("Réclamer").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_delete").setEmoji(E.trash).setLabel("Supprimer").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("voc_whitelist").setEmoji(E.plus).setLabel("Whitelist").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_unwhitelist").setEmoji(E.lock).setLabel("Unwhitelist").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_allowrole").setEmoji(E.crown).setLabel("Autoriser rôle").setStyle(ButtonStyle.Secondary)
   );
   const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("voc_bitrate").setEmoji(E.voice).setLabel("Bitrate").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_kick").setEmoji(E.member).setLabel("Expulser").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_mute").setEmoji(E.lock).setLabel("Mute").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_status").setEmoji(E.pen).setLabel("Statut").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_save").setEmoji(E.settings).setLabel("Sauvegarder").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("voc_removerole").setEmoji(E.forbidden).setLabel("Retirer rôle").setStyle(ButtonStyle.Secondary)
+  );
+  const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("voc_transfer").setEmoji(E.crown).setLabel("Transférer").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_claim").setEmoji(E.voice).setLabel("Réclamer").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_trust").setEmoji(E.crown).setLabel("Promouvoir").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_untrust").setEmoji(E.forbidden).setLabel("Rétrograder").setStyle(ButtonStyle.Secondary)
+  );
+  const row5 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("voc_save").setEmoji(E.save).setLabel("Sauvegarder").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_delete").setEmoji(E.trash).setLabel("Supprimer").setStyle(ButtonStyle.Danger)
   );
 
-  await channel.send({ content: `<@${owner.id}>`, embeds: [embed], components: [row1, row2, row3] });
+  await channel.send({ content: `<@${owner.id}>`, embeds: [embed], components: [row1, row2, row3, row4, row5] });
 }
 
 function getData(interaction) {
@@ -413,6 +442,17 @@ function getData(interaction) {
 function isOwner(interaction, data) {
   return data && data.ownerId === interaction.user.id;
 }
+
+function isTrusted(data, userId) {
+  return Boolean(data && data.trusted && data.trusted.has(userId));
+}
+
+function canModerate(interaction, data) {
+  return isOwner(interaction, data) || isTrusted(data, interaction.user.id);
+}
+
+const MODERATE_BUTTONS = ["voc_kick", "voc_mute"];
+const MODERATE_SELECTS = ["voc_select_kick", "voc_select_mute"];
 
 async function handleButton(interaction) {
   const data = getData(interaction);
@@ -443,8 +483,11 @@ async function handleButton(interaction) {
     return;
   }
 
-  if (!isOwner(interaction, data)) {
-    await interaction.reply({ embeds: [red("Seul le propriétaire peut faire ça")], flags: MessageFlags.Ephemeral });
+  const buttonAllowed = MODERATE_BUTTONS.includes(interaction.customId)
+    ? canModerate(interaction, data)
+    : isOwner(interaction, data);
+  if (!buttonAllowed) {
+    await interaction.reply({ embeds: [red("Tu n'as pas la permission de faire ça")], flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -504,6 +547,29 @@ async function handleButton(interaction) {
       const modal = new ModalBuilder()
         .setCustomId("voc_modal_save")
         .setTitle("Sauvegarde du salon")
+        .setLabelComponents(label);
+      await interaction.showModal(modal);
+      break;
+    }
+    case "voc_save_options": {
+      const checkboxes = new CheckboxGroupBuilder()
+        .setCustomId("fields")
+        .setMinValues(1)
+        .addOptions(
+          new CheckboxGroupOptionBuilder().setLabel("Nom").setValue("name").setDefault(true),
+          new CheckboxGroupOptionBuilder().setLabel("Statut").setValue("status").setDefault(true),
+          new CheckboxGroupOptionBuilder().setLabel("Limite de membres").setValue("limit").setDefault(true),
+          new CheckboxGroupOptionBuilder().setLabel("Bitrate").setValue("bitrate").setDefault(true),
+          new CheckboxGroupOptionBuilder().setLabel("Visibilité").setValue("hidden").setDefault(true),
+          new CheckboxGroupOptionBuilder().setLabel("Blacklist").setValue("blacklist").setDefault(true)
+        );
+      const label = new LabelBuilder()
+        .setLabel("Éléments à sauvegarder")
+        .setDescription("Coche ce que tu veux inclure")
+        .setCheckboxGroupComponent(checkboxes);
+      const modal = new ModalBuilder()
+        .setCustomId("voc_modal_save_fields")
+        .setTitle("Options de sauvegarde")
         .setLabelComponents(label);
       await interaction.showModal(modal);
       break;
@@ -605,6 +671,48 @@ async function handleButton(interaction) {
       await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
       break;
     }
+    case "voc_whitelist": {
+      const row = new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder().setCustomId("voc_select_whitelist").setPlaceholder("Choisis un membre à autoriser").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
+    case "voc_unwhitelist": {
+      const row = new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder().setCustomId("voc_select_unwhitelist").setPlaceholder("Choisis un membre à retirer").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
+    case "voc_trust": {
+      const row = new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder().setCustomId("voc_select_trust").setPlaceholder("Choisis un co-propriétaire").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
+    case "voc_untrust": {
+      const row = new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder().setCustomId("voc_select_untrust").setPlaceholder("Choisis un co-propriétaire à retirer").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
+    case "voc_allowrole": {
+      const row = new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId("voc_select_allowrole").setPlaceholder("Choisis un rôle à autoriser").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
+    case "voc_removerole": {
+      const row = new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId("voc_select_removerole").setPlaceholder("Choisis un rôle à retirer").setMaxValues(1)
+      );
+      await interaction.reply({ components: [row], flags: MessageFlags.Ephemeral });
+      break;
+    }
   }
 }
 
@@ -652,64 +760,85 @@ async function handleModal(interaction) {
 
   if (interaction.customId === "voc_modal_save") {
     const action = interaction.fields.getRadioGroup("action");
-    const channel = interaction.channel;
-    const presets = loadPresets();
 
     if (action === "save") {
-      presets[interaction.user.id] = {
-        name: channel.name,
-        status: data.status ?? null,
-        limit: channel.userLimit,
-        bitrate: channel.bitrate,
-        hidden: isHidden(channel),
-        blacklist: [...data.blacklist]
-      };
-      savePresets(presets);
-      await interaction.reply({ embeds: [blurple(`${E.check} Configuration du salon sauvegardée`)], flags: MessageFlags.Ephemeral });
+      const embed = new EmbedBuilder()
+        .setColor(COLORS.blurple)
+        .setTitle(`${E.settings} Configuration supplémentaire nécessaire`)
+        .setDescription("Choisis les éléments du salon à inclure dans ta sauvegarde.");
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("voc_save_options").setEmoji(E.save).setLabel("Choisir les options").setStyle(ButtonStyle.Primary)
+      );
+      await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
       return;
     }
 
-    // action === "load"
-    const preset = presets[interaction.user.id];
+    const channel = interaction.channel;
+    const preset = loadPresets()[interaction.user.id];
     if (!preset) {
       await interaction.reply({ embeds: [red("Aucune sauvegarde trouvée")], flags: MessageFlags.Ephemeral });
       return;
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if ("name" in preset && preset.name) await channel.setName(preset.name).catch(() => {});
+    if ("limit" in preset && typeof preset.limit === "number") await channel.setUserLimit(preset.limit).catch(() => {});
+    if ("bitrate" in preset && typeof preset.bitrate === "number") await channel.setBitrate(preset.bitrate).catch(() => {});
+    if ("status" in preset) await setChannelStatus(channel, preset.status, data).catch(() => {});
 
-    if (preset.name) await channel.setName(preset.name).catch(() => {});
-    if (typeof preset.limit === "number") await channel.setUserLimit(preset.limit).catch(() => {});
-    if (typeof preset.bitrate === "number") await channel.setBitrate(preset.bitrate).catch(() => {});
-    await setChannelStatus(channel, preset.status, data).catch(() => {});
+    if ("hidden" in preset) {
+      const everyone = channel.guild.roles.everyone;
+      await channel.permissionOverwrites.edit(everyone, { ViewChannel: preset.hidden ? false : null }).catch(() => {});
+    }
 
-    const everyone = channel.guild.roles.everyone;
-    await channel.permissionOverwrites.edit(everyone, { ViewChannel: preset.hidden ? false : null }).catch(() => {});
-
-    const target = new Set(preset.blacklist || []);
-    // Retire les membres qui ne sont plus blacklist dans la sauvegarde
-    for (const id of [...data.blacklist]) {
-      if (!target.has(id)) {
-        data.blacklist.delete(id);
-        await channel.permissionOverwrites.delete(id).catch(() => {});
+    if ("blacklist" in preset && Array.isArray(preset.blacklist)) {
+      const target = new Set(preset.blacklist);
+      for (const id of [...data.blacklist]) {
+        if (!target.has(id)) {
+          data.blacklist.delete(id);
+          await channel.permissionOverwrites.delete(id).catch(() => {});
+        }
       }
+      for (const id of target) {
+        data.blacklist.add(id);
+        await channel.permissionOverwrites.edit(id, { Connect: false, ViewChannel: false }).catch(() => {});
+        const member = channel.members.get(id);
+        if (member) await member.voice.disconnect().catch(() => {});
+      }
+      saveData();
     }
-    // Applique les membres blacklist de la sauvegarde
-    for (const id of target) {
-      data.blacklist.add(id);
-      await channel.permissionOverwrites.edit(id, { Connect: false, ViewChannel: false }).catch(() => {});
-      const member = channel.members.get(id);
-      if (member) await member.voice.disconnect().catch(() => {});
-    }
-    saveData();
 
     await interaction.editReply({ embeds: [blurple(`${E.check} Sauvegarde appliquée au salon`)] });
+  }
+
+  if (interaction.customId === "voc_modal_save_fields") {
+    const fields = interaction.fields.getCheckboxGroup("fields");
+    const channel = interaction.channel;
+    const presets = loadPresets();
+    const preset = {};
+
+    if (fields.includes("name")) preset.name = channel.name;
+    if (fields.includes("status")) preset.status = data.status ?? null;
+    if (fields.includes("limit")) preset.limit = channel.userLimit;
+    if (fields.includes("bitrate")) preset.bitrate = channel.bitrate;
+    if (fields.includes("hidden")) preset.hidden = isHidden(channel);
+    if (fields.includes("blacklist")) preset.blacklist = [...data.blacklist];
+
+    presets[interaction.user.id] = preset;
+    savePresets(presets);
+    await interaction.reply({
+      embeds: [blurple(`${E.check} Sauvegarde enregistrée (${fields.length} élément(s))`)],
+      flags: MessageFlags.Ephemeral
+    });
   }
 }
 
 async function handleSelect(interaction) {
   const data = getData(interaction);
-  if (!data || !isOwner(interaction, data)) {
+  const selectAllowed = MODERATE_SELECTS.includes(interaction.customId)
+    ? canModerate(interaction, data)
+    : isOwner(interaction, data);
+  if (!data || !selectAllowed) {
     await interaction.reply({ embeds: [red("Action refusée")], flags: MessageFlags.Ephemeral });
     return;
   }
@@ -779,6 +908,60 @@ async function handleSelect(interaction) {
       embeds: [blurple(mute ? `🔇 <@${targetId}> a été rendu muet` : `🔊 <@${targetId}> n'est plus muet`)],
       components: []
     });
+  }
+
+  if (interaction.customId === "voc_select_whitelist") {
+    data.whitelist.add(targetId);
+    data.blacklist.delete(targetId);
+    saveData();
+    await interaction.channel.permissionOverwrites.edit(targetId, { Connect: true, ViewChannel: true });
+    await interaction.update({ embeds: [blurple(`${E.check} <@${targetId}> autorisé à rejoindre le salon`)], components: [] });
+  }
+
+  if (interaction.customId === "voc_select_unwhitelist") {
+    data.whitelist.delete(targetId);
+    saveData();
+    await interaction.channel.permissionOverwrites.delete(targetId).catch(() => {});
+    await interaction.update({ embeds: [blurple(`${E.forbidden} <@${targetId}> retiré de la whitelist`)], components: [] });
+  }
+
+  if (interaction.customId === "voc_select_trust") {
+    if (targetId === data.ownerId) {
+      await interaction.update({ embeds: [red("Tu es déjà propriétaire")], components: [] });
+      return;
+    }
+    data.trusted.add(targetId);
+    saveData();
+    await interaction.update({ embeds: [blurple(`${E.crown} <@${targetId}> est désormais co-propriétaire (expulser / mute)`)], components: [] });
+  }
+
+  if (interaction.customId === "voc_select_untrust") {
+    data.trusted.delete(targetId);
+    saveData();
+    await interaction.update({ embeds: [blurple(`${E.forbidden} <@${targetId}> n'est plus co-propriétaire`)], components: [] });
+  }
+}
+
+async function handleRoleSelect(interaction) {
+  const data = getData(interaction);
+  if (!data || !isOwner(interaction, data)) {
+    await interaction.reply({ embeds: [red("Action refusée")], flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const roleId = interaction.values[0];
+
+  if (interaction.customId === "voc_select_allowrole") {
+    data.allowedRoles.add(roleId);
+    saveData();
+    await interaction.channel.permissionOverwrites.edit(roleId, { Connect: true, ViewChannel: true });
+    await interaction.update({ embeds: [blurple(`${E.check} Le rôle <@&${roleId}> peut rejoindre le salon`)], components: [] });
+  }
+
+  if (interaction.customId === "voc_select_removerole") {
+    data.allowedRoles.delete(roleId);
+    saveData();
+    await interaction.channel.permissionOverwrites.delete(roleId).catch(() => {});
+    await interaction.update({ embeds: [blurple(`${E.forbidden} Rôle <@&${roleId}> retiré des autorisations`)], components: [] });
   }
 }
 
