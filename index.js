@@ -15,6 +15,7 @@ const {
   LabelBuilder,
   RadioGroupBuilder,
   RadioGroupOptionBuilder,
+  ActivityType,
   MessageFlags
 } = require("discord.js");
 const fs = require("fs");
@@ -23,6 +24,12 @@ require("dotenv").config();
 
 const config = {
   token: process.env.TOKEN,
+  clientId: process.env.CLIENT_ID,
+  presenceStatus: process.env.PRESENCE_STATUS || "online",
+  presenceType: Number(process.env.PRESENCE_TYPE ?? 4),
+  presenceText: process.env.PRESENCE_TEXT || "",
+  botName: process.env.BOT_NAME,
+  botDescription: process.env.BOT_DESCRIPTION,
   creatorChannelName: process.env.CREATOR_CHANNEL_NAME,
   creationCooldown: Number(process.env.CREATION_COOLDOWN ?? 0),
   ownerID: process.env.OWNER_ID
@@ -118,8 +125,34 @@ function loadData() {
   }
 }
 
+// Applique l'identité et la présence du bot depuis le .env.
+async function applyIdentity() {
+  client.user.setPresence({
+    status: config.presenceStatus,
+    activities: config.presenceText
+      ? [{ name: config.presenceText, type: config.presenceType, state: config.presenceText }]
+      : []
+  });
+
+  if (config.botName && client.user.username !== config.botName) {
+    // Discord limite fortement les changements de nom : on tente sans bloquer le démarrage.
+    await client.user.setUsername(config.botName).catch((e) => console.error("Échec setUsername:", e.message));
+  }
+
+  if (config.botDescription) {
+    await client.application.fetch().catch(() => {});
+    if (client.application.description !== config.botDescription) {
+      await client.application.edit({ description: config.botDescription }).catch((e) =>
+        console.error("Échec maj description:", e.message)
+      );
+    }
+  }
+}
+
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+
+  await applyIdentity();
 
   const saved = loadData();
   for (const [channelId, d] of Object.entries(saved)) {
