@@ -27,7 +27,7 @@ Bot Discord de **salons vocaux temporaires**
 | Sauvegarder | Sauvegarde / charge une config |
 | Supprimer | Supprime le salon |
 
-Les actions sont réservées au **propriétaire**, sauf **Expulser** et **Mute** qui sont aussi accessibles aux **co-propriétaires**, et **Réclamer**
+Les actions sont réservées au **propriétaire**, sauf **expulser** et **mute** qui sont aussi accessibles aux **co-propriétaires**, et **réclamer**
 
 ## Commande
 
@@ -56,14 +56,14 @@ cp .env.example .env
 | Variable | Description |
 | --- | --- |
 | `TOKEN` | Token du bot Discord |
-| `CLIENT_ID` | ID de l'application (client ID) |
+| `CLIENT_ID` | ID de l'application |
 | `PRESENCE_STATUS` | Statut de présence : `online`, `idle`, `dnd`, `invisible` |
 | `PRESENCE_TYPE` | Type d'activité : `0` Joue, `1` Stream, `2` Écoute, `3` Regarde, `4` Personnalisé, `5` Participe |
-| `PRESENCE_TEXT` | Texte de présence (vide = aucune activité) |
-| `BOT_NAME` | Nom du bot, appliqué au démarrage s'il diffère (vide = inchangé) |
-| `BOT_DESCRIPTION` | Description de l'application (vide = inchangée) |
+| `PRESENCE_TEXT` | Texte de présence|
+| `BOT_NAME` | Nom du bot|
+| `BOT_DESCRIPTION` | Description de l'application |
 | `CREATOR_CHANNEL_NAME` | Nom du salon vocal créateur à détecter |
-| `CREATION_COOLDOWN` | Délai (secondes) entre deux créations de salon par membre |
+| `CREATION_COOLDOWN` | Délai entre deux créations de salon par membre |
 
 ## Démarrage
 
