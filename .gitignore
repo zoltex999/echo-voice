@@ -2,4 +2,5 @@ node_modules/
 .env
 modules.js
 data.json
+presets.json
 .claude/

@@ -36,6 +36,7 @@ const config = {
 };
 
 const DATA_FILE = "./data.json";
+const PRESETS_FILE = "./presets.json";
 
 const E = {
   plus: "<:plus:1514249518890090576>",
@@ -107,7 +108,7 @@ function red(description) {
 function saveData() {
   const obj = {};
   for (const [id, d] of tempChannels) {
-    obj[id] = { ownerId: d.ownerId, blacklist: [...d.blacklist], joinOrder: d.joinOrder };
+    obj[id] = { ownerId: d.ownerId, blacklist: [...d.blacklist], joinOrder: d.joinOrder, status: d.status ?? null };
   }
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
@@ -122,6 +123,41 @@ function loadData() {
     return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   } catch {
     return {};
+  }
+}
+
+// Presets par propriétaire : { [userId]: { name, status, limit, bitrate, hidden, blacklist } }
+function loadPresets() {
+  if (!fs.existsSync(PRESETS_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(PRESETS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function savePresets(presets) {
+  try {
+    fs.writeFileSync(PRESETS_FILE, JSON.stringify(presets, null, 2));
+  } catch (e) {
+    console.error("Échec sauvegarde presets.json:", e);
+  }
+}
+
+// Indique si le salon est caché pour @everyone (permission ViewChannel refusée).
+function isHidden(channel) {
+  const everyoneId = channel.guild.roles.everyone.id;
+  return Boolean(channel.permissionOverwrites.cache.get(everyoneId)?.deny.has(PermissionFlagsBits.ViewChannel));
+}
+
+// Met à jour le statut du salon vocal (route REST dédiée) et mémorise la valeur.
+async function setChannelStatus(channel, status, data) {
+  await channel.client.rest.put(`/channels/${channel.id}/voice-status`, {
+    body: { status: status || null }
+  });
+  if (data) {
+    data.status = status || null;
+    saveData();
   }
 }
 
@@ -182,7 +218,7 @@ client.once("ready", async () => {
 
     await grantOwner(channel);
     await enforceStatusLock(channel);
-    tempChannels.set(channelId, { ownerId, blacklist: new Set(d.blacklist || []), joinOrder });
+    tempChannels.set(channelId, { ownerId, blacklist: new Set(d.blacklist || []), joinOrder, status: d.status ?? null });
   }
   saveData();
   console.log(`♻️ ${tempChannels.size} salon(s) temporaire(s) rechargé(s)`);
@@ -247,7 +283,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     });
     await grantOwner(channel);
     await enforceStatusLock(channel);
-    tempChannels.set(channel.id, { ownerId: member.id, blacklist: new Set(), joinOrder: [member.id] });
+    tempChannels.set(channel.id, { ownerId: member.id, blacklist: new Set(), joinOrder: [member.id], status: null });
     saveData();
     await member.voice.setChannel(channel);
     await sendPanel(channel, member);
@@ -363,7 +399,8 @@ async function sendPanel(channel, owner) {
     new ButtonBuilder().setCustomId("voc_bitrate").setEmoji(E.voice).setLabel("Bitrate").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_kick").setEmoji(E.member).setLabel("Expulser").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("voc_mute").setEmoji(E.lock).setLabel("Mute").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("voc_status").setEmoji(E.pen).setLabel("Statut").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("voc_status").setEmoji(E.pen).setLabel("Statut").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("voc_save").setEmoji(E.settings).setLabel("Sauvegarder").setStyle(ButtonStyle.Secondary)
   );
 
   await channel.send({ content: `<@${owner.id}>`, embeds: [embed], components: [row1, row2, row3] });
@@ -443,6 +480,31 @@ async function handleButton(interaction) {
               .setRequired(false)
           )
         );
+      await interaction.showModal(modal);
+      break;
+    }
+    case "voc_save": {
+      const radio = new RadioGroupBuilder()
+        .setCustomId("action")
+        .setRequired(true)
+        .addOptions(
+          new RadioGroupOptionBuilder()
+            .setLabel("Sauvegarder")
+            .setValue("save")
+            .setDescription("Enregistrer la config actuelle du salon"),
+          new RadioGroupOptionBuilder()
+            .setLabel("Load")
+            .setValue("load")
+            .setDescription("Appliquer ta sauvegarde à ce salon")
+        );
+      const label = new LabelBuilder()
+        .setLabel("Sauvegarde")
+        .setDescription("Choisis une action")
+        .setRadioGroupComponent(radio);
+      const modal = new ModalBuilder()
+        .setCustomId("voc_modal_save")
+        .setTitle("Sauvegarde du salon")
+        .setLabelComponents(label);
       await interaction.showModal(modal);
       break;
     }
@@ -561,9 +623,7 @@ async function handleModal(interaction) {
 
   if (interaction.customId === "voc_modal_status") {
     const status = interaction.fields.getTextInputValue("status").trim();
-    await interaction.client.rest.put(`/channels/${interaction.channelId}/voice-status`, {
-      body: { status: status || null }
-    });
+    await setChannelStatus(interaction.channel, status, data);
     await interaction.reply({
       embeds: [blurple(status ? `${E.pen} Statut mis à jour : **${status}**` : `${E.pen} Statut effacé`)],
       flags: MessageFlags.Ephemeral
@@ -588,6 +648,62 @@ async function handleModal(interaction) {
     }
     await interaction.channel.setBitrate(value).catch(() => {});
     await interaction.reply({ embeds: [blurple(`${E.voice} Bitrate réglé sur **${value / 1000} kbps**`)], flags: MessageFlags.Ephemeral });
+  }
+
+  if (interaction.customId === "voc_modal_save") {
+    const action = interaction.fields.getRadioGroup("action");
+    const channel = interaction.channel;
+    const presets = loadPresets();
+
+    if (action === "save") {
+      presets[interaction.user.id] = {
+        name: channel.name,
+        status: data.status ?? null,
+        limit: channel.userLimit,
+        bitrate: channel.bitrate,
+        hidden: isHidden(channel),
+        blacklist: [...data.blacklist]
+      };
+      savePresets(presets);
+      await interaction.reply({ embeds: [blurple(`${E.check} Configuration du salon sauvegardée`)], flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    // action === "load"
+    const preset = presets[interaction.user.id];
+    if (!preset) {
+      await interaction.reply({ embeds: [red("Aucune sauvegarde trouvée")], flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    if (preset.name) await channel.setName(preset.name).catch(() => {});
+    if (typeof preset.limit === "number") await channel.setUserLimit(preset.limit).catch(() => {});
+    if (typeof preset.bitrate === "number") await channel.setBitrate(preset.bitrate).catch(() => {});
+    await setChannelStatus(channel, preset.status, data).catch(() => {});
+
+    const everyone = channel.guild.roles.everyone;
+    await channel.permissionOverwrites.edit(everyone, { ViewChannel: preset.hidden ? false : null }).catch(() => {});
+
+    const target = new Set(preset.blacklist || []);
+    // Retire les membres qui ne sont plus blacklist dans la sauvegarde
+    for (const id of [...data.blacklist]) {
+      if (!target.has(id)) {
+        data.blacklist.delete(id);
+        await channel.permissionOverwrites.delete(id).catch(() => {});
+      }
+    }
+    // Applique les membres blacklist de la sauvegarde
+    for (const id of target) {
+      data.blacklist.add(id);
+      await channel.permissionOverwrites.edit(id, { Connect: false, ViewChannel: false }).catch(() => {});
+      const member = channel.members.get(id);
+      if (member) await member.voice.disconnect().catch(() => {});
+    }
+    saveData();
+
+    await interaction.editReply({ embeds: [blurple(`${E.check} Sauvegarde appliquée au salon`)] });
   }
 }
 
