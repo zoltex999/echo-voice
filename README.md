@@ -93,4 +93,4 @@ Supporte le développeur et le bot en faisant un petit don
 ## A propos
 
 Crée et développé par zoltex999, 
-Tous droits réservés
+Tous droits réservés, Voir License MIT
